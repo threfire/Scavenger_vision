@@ -33,7 +33,7 @@ class GUI:
         button_disp_pos = image.resize_map_pos(
             self.background.width(), self.background.height(),
             self._disp.width(), self._disp.height(),
-            image.Fit.FIT_CONTAIN,
+            image.Fit.FIT_FILL,
             button['x'], button['y'], button['width'], button['height']
         )
         
@@ -51,7 +51,7 @@ class GUI:
         slider_disp_pos = image.resize_map_pos(
             self.background.width(), self.background.height(),
             self._disp.width(), self._disp.height(),
-            image.Fit.FIT_CONTAIN,
+            image.Fit.FIT_FILL,
             slider['x'], slider['y'], slider['width'], slider['height']
         )
         
@@ -130,7 +130,7 @@ class GUI:
         x, y = image.resize_map_pos_reverse(
             self.background.width(), self.background.height(),
             self._disp.width(), self._disp.height(),
-            image.Fit.FIT_CONTAIN,
+            image.Fit.FIT_FILL,
             self.touch_x, self.touch_y
         )
         x = x if x >= 0 else 0
@@ -196,7 +196,7 @@ class GUI:
                     disp_pos = image.resize_map_pos(
                         self.background.width(), self.background.height(),
                         self._disp.width(), self._disp.height(),
-                        image.Fit.FIT_CONTAIN,
+                        image.Fit.FIT_FILL,
                         slider['x'], slider['y'], slider['width'], slider['height']
                     )
 
@@ -282,7 +282,7 @@ class GUI:
                     label_size = slider['label_size']
                     self.background.draw_string(slider['x'], slider['y']-label_size.height(), slider['label'], slider['slider_color'] )
 
-        self._disp.show(self.background)
+        self._disp.show(self.background, image.Fit.FIT_FILL)
         self.dirty = False
 
 if __name__ == '__main__':
