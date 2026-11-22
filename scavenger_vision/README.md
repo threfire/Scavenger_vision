@@ -1,6 +1,9 @@
 本文为 `scavenger_vision` 工程说明，对应源码版本 `1.0.9`，适用于 MaixCAM Pro 与 MaixCAM2 上的圆形定位与红、绿、黄、黑、蓝五色识别。程序上电进入模式3，持续采图、计算平均圆心并通过串口输出坐标。
 
-本 README 含人量为零，全部由 AI 生成。
+**main**分支实测帧率**11fps**
+**cam2**分支实测帧率**60fps**
+
+本 README 往下含人量为零，全部由 AI 生成。
 
 工程目录为 `scavenger_vision/`，应用标识与显示名称均为 `scavenger_vision`；下列文件路径相对于该目录。
 
