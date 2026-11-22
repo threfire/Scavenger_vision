@@ -2,7 +2,7 @@
 
 **main**分支实测帧率**11fps**
 **cam2**分支实测帧率**60fps**
-
+> P.S.：以上帧率为不接maixvision且关闭屏显测试
 本 README 往下含人量为零，全部由 AI 生成。
 
 工程目录为 `scavenger_vision/`，应用标识与显示名称均为 `scavenger_vision`；下列文件路径相对于该目录。
