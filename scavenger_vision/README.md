@@ -6,7 +6,7 @@
 | --- | --- |
 | [main.py](main.py) | 相机初始化、白平衡校准与加载、圆形检测、颜色分类、串口收发、屏显开关及主循环 |
 | [gui.py](gui.py) | GUI，即屏幕上的按钮和滑条；处理触摸事件、绘制控件并刷新屏幕 |
-| [app.yaml](app.yaml) | 应用信息，当前应用标识与名称均为 `scavenger_vison`，版本为 `1.0.9` |
+| [app.yaml](app.yaml) | 应用信息，当前应用标识与名称均为 `scavenger_vision`，版本为 `1.0.9` |
 | `app.png` | 应用图标 |
 | `data/white_balance.json` | 设备运行后生成的白平衡参数文件 |
 
