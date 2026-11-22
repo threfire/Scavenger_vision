@@ -35,6 +35,8 @@ _perf = {'capture': 0, 'process': 0, 'gui': 0}
 _preview = np.zeros((240, 320, 3), dtype=np.uint8)  # 保存图像底图，供文字逐帧重绘
 _screen = np.zeros((320, 320, 3), dtype=np.uint8)
 _screen_image = None  # 保持共享显示缓冲区存活
+TEXT_REFRESH_INTERVAL_MS = 500  # 关闭预览时的文字刷新间隔
+_last_text_refresh_ms = None
 COLOR_NAMES = ('未知', '红', '绿', '黄', '黑', '蓝')
 _color_state = {'candidate': (), 'frames': 0, 'label': '未检测'}
 CIRCLE_MIN_AREA = 1200
@@ -258,8 +260,9 @@ def camera_Init():
 
 
 def process_frame(img, comm, kernel, gui, fps):
-    global Yuanxy, _screen_image
+    global Yuanxy, _screen_image, _last_text_refresh_ms
     process_start = time.ticks_ms()
+    gui.poll()  # 每帧读取触摸，保证关闭预览后按钮和滑条继续响应
     render = _display_enabled
     circle_ellipses = []
     detected_colors = []
@@ -377,6 +380,11 @@ def process_frame(img, comm, kernel, gui, fps):
     update_color_label(detected_colors)
     render_start = time.ticks_ms()
     _perf['process'] = render_start - process_start
+    if (not render and _screen_image is not None and not gui.dirty
+            and _last_text_refresh_ms is not None
+            and render_start - _last_text_refresh_ms < TEXT_REFRESH_INTERVAL_MS):
+        _perf['gui'] = 0
+        return
     if render:
         x, y, width, height = WB_ROI
         cv2.rectangle(ceroded_rgb, (x, y), (x + width, y + height), (0, 255, 255), 1)
@@ -407,8 +415,9 @@ def process_frame(img, comm, kernel, gui, fps):
         if detail:
             img_show.draw_string(65, 166 + line * 20, detail, image.COLOR_GREEN)
     img_show.draw_string(65, 242, _wb_status, image.COLOR_GREEN)
-    gui.run(img_show)
+    gui.run(img_show, poll_touch=False)
     _perf['gui'] = time.ticks_ms() - render_start
+    _last_text_refresh_ms = render_start
 
 
 comm = Comm()  # 串口初始化
@@ -417,9 +426,10 @@ comm = Comm()  # 串口初始化
 
 
 def set_display_enabled(enabled):
-    global _display_enabled
+    global _display_enabled, _last_text_refresh_ms
     if _display_enabled != enabled:
         _display_enabled = enabled
+        _last_text_refresh_ms = None
         gui.setButtonLabel(_btn_screen, '屏显开' if enabled else '屏显关')
 
 
