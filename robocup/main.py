@@ -35,6 +35,7 @@ _perf = {'capture': 0, 'process': 0, 'gui': 0}
 _preview = np.zeros((240, 320, 3), dtype=np.uint8)  # 保存图像底图，供文字逐帧重绘
 _screen = np.zeros((320, 320, 3), dtype=np.uint8)
 _screen_image = None  # 保持共享显示缓冲区存活
+_process_buffers = None  # 首帧按检测尺寸分配，后续复用OpenCV输出数组
 TEXT_REFRESH_INTERVAL_MS = 500  # 关闭预览时的文字刷新间隔
 _last_text_refresh_ms = None
 COLOR_NAMES = ('未知', '红', '绿', '黄', '黑', '蓝')
@@ -260,7 +261,7 @@ def camera_Init():
 
 
 def process_frame(img, comm, kernel, gui, fps):
-    global Yuanxy, _screen_image, _last_text_refresh_ms
+    global Yuanxy, _screen_image, _last_text_refresh_ms, _process_buffers
     process_start = time.ticks_ms()
     gui.poll()  # 每帧读取触摸，保证关闭预览后按钮和滑条继续响应
     render = _display_enabled
@@ -272,24 +273,33 @@ def process_frame(img, comm, kernel, gui, fps):
     img_cv = image.image2cv(img, False, False)
     if img.format() != image.Format.FMT_BGR888:
         img_cv = image.image2cv(img, True, True)
-    detect_frame = cv2.resize(img_cv, None, fx=DETECT_SCALE, fy=DETECT_SCALE,
-                              interpolation=cv2.INTER_AREA)
+    if _process_buffers is None:
+        detect_frame = cv2.resize(img_cv, None, fx=DETECT_SCALE, fy=DETECT_SCALE,
+                                  interpolation=cv2.INTER_AREA)
+        _process_buffers = (
+            detect_frame, np.empty_like(detect_frame),
+            *(np.empty(detect_frame.shape[:2], dtype=np.uint8) for _ in range(6))
+        )
+    else:
+        cv2.resize(img_cv, None, dst=_process_buffers[0], fx=DETECT_SCALE,
+                   fy=DETECT_SCALE, interpolation=cv2.INTER_AREA)
+    detect_frame, frame_hsv, gray, blurred, edged, saturation, color_edges, ceroded = _process_buffers
 
     # 转灰度
-    gray = cv2.cvtColor(detect_frame, cv2.COLOR_BGR2GRAY)
+    cv2.cvtColor(detect_frame, cv2.COLOR_BGR2GRAY, dst=gray)
     # 高斯模糊去噪声
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    cv2.GaussianBlur(gray, (5, 5), 0, dst=blurred)
     # 边缘检测
-    edged = cv2.Canny(blurred, _context['threshold_circle'][0], _context['threshold_circle'][1])
+    cv2.Canny(blurred, *_context['threshold_circle'], edges=edged)
     # 饱和度边缘补充亮色圆形的边界。
-    frame_hsv = cv2.cvtColor(detect_frame, cv2.COLOR_BGR2HSV)
-    saturation = frame_hsv[:, :, 1]
-    color_edges = cv2.Canny(cv2.GaussianBlur(saturation, (5, 5), 0),
-                           *_context['threshold_circle'])
-    edged = cv2.bitwise_or(edged, color_edges)
+    cv2.cvtColor(detect_frame, cv2.COLOR_BGR2HSV, dst=frame_hsv)
+    cv2.extractChannel(frame_hsv, 1, dst=saturation)
+    cv2.GaussianBlur(saturation, (5, 5), 0, dst=blurred)
+    cv2.Canny(blurred, *_context['threshold_circle'], edges=color_edges)
+    cv2.bitwise_or(edged, color_edges, dst=edged)
     # 小范围连接边缘，并保留原始边缘像素。
-    ceroded = cv2.morphologyEx(edged, cv2.MORPH_CLOSE, kernel, iterations=1)
-    ceroded = cv2.bitwise_or(ceroded, edged)
+    cv2.morphologyEx(edged, cv2.MORPH_CLOSE, kernel, dst=ceroded, iterations=1)
+    cv2.bitwise_or(ceroded, edged, dst=ceroded)
     # 将单通道的ceroded转换为三通道BGR格式（便于显示和后续叠加彩色标记）
     ceroded_rgb = None
     if render:
@@ -307,14 +317,19 @@ def process_frame(img, comm, kernel, gui, fps):
 
     # 存储所有符合条件的圆形中心
     circle_centers = []
+    min_area = CIRCLE_MIN_AREA * DETECT_SCALE ** 2
+    min_perimeter = CIRCLE_MIN_PERIMETER * DETECT_SCALE
+    max_perimeter = 555 * DETECT_SCALE
     for cnt in contours:
+        if len(cnt) < 5:
+            continue
         area = cv2.contourArea(cnt)
+        if area < min_area:
+            continue
         perimeter = cv2.arcLength(cnt, True)
 
         # 过滤小轮廓和周长为0的异常轮廓
-        if (len(cnt) < 5 or perimeter < CIRCLE_MIN_PERIMETER * DETECT_SCALE
-                or area < CIRCLE_MIN_AREA * DETECT_SCALE ** 2
-                or perimeter > 555 * DETECT_SCALE):
+        if perimeter < min_perimeter or perimeter > max_perimeter:
             continue
 
         # 计算圆度
