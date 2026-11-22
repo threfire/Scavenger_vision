@@ -20,8 +20,8 @@ _btn_binary = -1
 _btn_wb = -1
 _slider_id = -1
 _wb_requested = False
-_wb_status = '白平衡:待校准'
-_wb_detail = '请用白纸覆盖中心框'
+_wb_status = ''
+_wb_detail = ''
 _wb_profile = None
 WB_ROI = (128, 88, 64, 64)  # 白纸采样框，坐标基于320×240取景图
 WB_DEFAULT_GAINS = [0.134, 0.0625, 0.0625, 0.1239]  # 官方MaixCAM初始增益
@@ -141,7 +141,7 @@ def load_white_balance(cam):
             raise ValueError('白平衡参数无效')
         apply_white_balance(cam, profile['gains'])
         _wb_profile = profile
-        _wb_status = '白平衡:已加载'
+        _wb_status = ''
         _wb_detail = ''
     except FileNotFoundError:
         pass
@@ -429,7 +429,8 @@ def process_frame(img, comm, kernel, gui, fps):
         detail = _wb_detail[line * 15:(line + 1) * 15]
         if detail:
             img_show.draw_string(65, 166 + line * 20, detail, image.COLOR_GREEN)
-    img_show.draw_string(65, 242, _wb_status, image.COLOR_GREEN)
+    if _wb_status:
+        img_show.draw_string(65, 242, _wb_status, image.COLOR_GREEN)
     gui.run(img_show, poll_touch=False)
     _perf['gui'] = time.ticks_ms() - render_start
     _last_text_refresh_ms = render_start
@@ -466,8 +467,8 @@ def btn_pressed(btn_id, state):
         _context['disp_binary'] = not _context['disp_binary']
     elif btn_id == _btn_wb:
         _wb_requested = True
-        _wb_status = '白平衡:校准中'
-        _wb_detail = '请保持白纸和相机静止'
+        _wb_status = ''
+        _wb_detail = ''
 
 
 def slider_changed(slider_id, value):
