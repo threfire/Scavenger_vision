@@ -1,5 +1,4 @@
-from maix import camera, display, image, time, app
-from maix.v1.machine import UART
+from maix import camera, display, image, time, app, uart, sys, pinmap, err
 from gui import GUI
 import cv2
 import numpy as np
@@ -24,7 +23,10 @@ _wb_status = '白平衡:待校准'
 _wb_detail = '请用白纸覆盖中心框'
 _wb_profile = None
 WB_ROI = (128, 88, 64, 64)  # 白纸采样框，坐标基于320×240取景图
-WB_DEFAULT_GAINS = [0.134, 0.0625, 0.0625, 0.1239]  # 官方MaixCAM初始增益
+WB_DEFAULT_GAINS = {
+    'maixcam': [0.134, 0.0625, 0.0625, 0.1239],
+    'maixcam2': [0.0682, 0.0, 0.0, 0.04897],
+}
 SOURCE_VERSION = '1.0.9'
 DEBUG_OUTPUT = False
 DISPLAY_OFF_COMMAND = 0x07
@@ -56,6 +58,10 @@ def valid_wb_gains(gains):
     return (gains is not None and len(gains) == 4
             and all(0 <= float(value) <= 1 for value in gains)
             and float(gains[0]) > 0 and float(gains[3]) > 0)
+
+
+def default_wb_gains():
+    return WB_DEFAULT_GAINS.get(sys.device_id(), WB_DEFAULT_GAINS['maixcam'])[:]
 
 
 def apply_white_balance(cam, gains):
@@ -160,7 +166,7 @@ def calibrate_white_balance(cam):
         if not valid_wb_gains(previous_gains) and _wb_profile is not None:
             previous_gains = _wb_profile['gains'][:]
         # 自动模式下的手动增益字段可能尚未初始化，使用官方初值启动。
-        gains = (previous_gains if valid_wb_gains(previous_gains) else WB_DEFAULT_GAINS)[:]
+        gains = (previous_gains if valid_wb_gains(previous_gains) else default_wb_gains())
         cam.awb_mode(camera.AwbMode.Manual)
         # 手动保持增益，分轮测量白纸并使红、蓝通道向绿色通道收敛。
         for attempt in range(8):
@@ -215,9 +221,16 @@ def calibrate_white_balance(cam):
 
 class Comm:  # 串口类
     def __init__(self):
-        uart = UART("/dev/ttyS0", 115200)
+        if sys.device_id() == 'maixcam2':
+            for pin, function in (('A21', 'UART4_TX'), ('A22', 'UART4_RX')):
+                err.check_raise(pinmap.set_pin_function(pin, function),
+                                '设置{}为{}失败'.format(pin, function))
+            serial_device = '/dev/ttyS4'
+        else:
+            serial_device = '/dev/ttyS0'
+        serial = uart.UART(serial_device, 115200)
         time.sleep_ms(100)  # wait uart ready
-        self.uart = uart
+        self.uart = serial
         self.Data_Temp = [0, 0]
 
     def send_detect(self, Mode, Data):  # 发送数据包
