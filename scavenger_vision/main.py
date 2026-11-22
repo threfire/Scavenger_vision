@@ -236,24 +236,11 @@ class Comm:  # 串口类
         self.uart = serial
         self.Data_Temp = [0, 0]
 
-    def send_detect(self, Mode, Data):  # 发送数据包
-        data = None
-        if Mode == 1:
-            data = bytes([0xb3, 0xb3, 0x01, int(Data[0]), int(Data[1]), int(Data[2]), int(Data[3]), 0, 0x5b])
-            self.uart.write(data)
-        if Mode == 2:
-            data = bytes([0xb3, 0xb3, 0x02, int(Data[0]), int(Data[1]), int(Data[2]), int(Data[3]), 0, 0x5b])
-            self.uart.write(data)
-        if Mode == 3:
-            data = bytes([0xb3, 0xb3, 0x03, int(Data[0]), int(Data[1]), int(Data[2]), int(Data[3]), int(Data[4]), 0x5b])
-            self.uart.write(data)
-        if Mode == 4:
-            data = bytes([0xb3, 0xb3, 0x04, int(Data), 0, 0, 0, 0, 0x5b])
-            self.uart.write(data)
-        if Mode == 5:
-            data = bytes([0xb3, 0xb3, 0x04, 6, 6, 6, 6, 6, 0x5b])
-            self.uart.write(data)
-        if data is not None and DEBUG_OUTPUT:
+    def send_detect(self, Data):  # 五字节数据区：X补值、X基础值、Y补值、Y基础值、颜色
+        data = bytes([0xb3, 0xb3, int(Data[0]), int(Data[1]), int(Data[2]),
+                      int(Data[3]), int(Data[4]), 0x5b])
+        self.uart.write(data)
+        if DEBUG_OUTPUT:
             print("send_data:", data)
 
     def read_display_command(self):
@@ -399,13 +386,15 @@ def process_frame(img, comm, kernel, gui, fps):
             Yuanxy[2] = Yuanxy[3] - 255
             Yuanxy[3] = 255
 
-        comm.send_detect(0x02, Yuanxy)
-
     if circle_centers:
         detected_colors = [detect_circle_color(detect_frame, ellipse, frame_hsv)
                            for center, ellipse in zip(circle_centers, circle_ellipses)
                            if center in filtered_centers]
     update_color_label(detected_colors)
+    if circle_centers:
+        color_counts = [detected_colors.count(value) for value in range(1, len(COLOR_NAMES))]
+        Yuanxy[4] = color_counts.index(max(color_counts)) + 1 if any(color_counts) else 0
+        comm.send_detect(Yuanxy)
     render_start = time.ticks_ms()
     _perf['process'] = render_start - process_start
     if (not render and _screen_image is not None and not gui.dirty
