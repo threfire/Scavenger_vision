@@ -20,6 +20,7 @@ class GUI:
         self._ts = touchscreen.TouchScreen()
         self._disp = display.Display()
         self._last_pressed = 0
+        self.dirty = True  # 控件变化后在当前帧重绘
 
     def _is_in_button(self, button_id: int, x: int, y: int) -> bool:
         '''
@@ -32,7 +33,7 @@ class GUI:
         button_disp_pos = image.resize_map_pos(
             self.background.width(), self.background.height(),
             self._disp.width(), self._disp.height(),
-            image.Fit.FIT_CONTAIN,
+            image.Fit.FIT_FILL,
             button['x'], button['y'], button['width'], button['height']
         )
         
@@ -50,7 +51,7 @@ class GUI:
         slider_disp_pos = image.resize_map_pos(
             self.background.width(), self.background.height(),
             self._disp.width(), self._disp.height(),
-            image.Fit.FIT_CONTAIN,
+            image.Fit.FIT_FILL,
             slider['x'], slider['y'], slider['width'], slider['height']
         )
         
@@ -129,7 +130,7 @@ class GUI:
         x, y = image.resize_map_pos_reverse(
             self.background.width(), self.background.height(),
             self._disp.width(), self._disp.height(),
-            image.Fit.FIT_CONTAIN,
+            image.Fit.FIT_FILL,
             self.touch_x, self.touch_y
         )
         x = x if x >= 0 else 0
@@ -146,6 +147,7 @@ class GUI:
         if self.buttons[button_id]['label'] != label:
             self.buttons[button_id]['label'] = label
             self.buttons[button_id]['label_size'] = image.string_size(label)
+            self.dirty = True
         return True
     
     def setSliderLabel(self, slider_id: int, label: str):
@@ -158,6 +160,7 @@ class GUI:
         if self.sliders[slider_id]['label'] != label:
             self.sliders[slider_id]['label'] = label
             self.sliders[slider_id]['label_size'] = image.string_size(label)
+            self.dirty = True
         return True
     
     def setSliderValue(self, slider_id: int , value:int):
@@ -168,6 +171,7 @@ class GUI:
             return False
         
         self.sliders[slider_id]['value'] = value
+        self.dirty = True
         return True
 
     def poll(self) -> None:
@@ -177,6 +181,7 @@ class GUI:
         # 处理按钮触摸事件
         if self._last_pressed != pressed:
             self._last_pressed = pressed
+            self.dirty = True
             for button_id in range(len(self.buttons)):
                 if self._is_in_button(button_id, self.touch_x, self.touch_y):
                     if self.button_callbacks[button_id] is not None:
@@ -191,7 +196,7 @@ class GUI:
                     disp_pos = image.resize_map_pos(
                         self.background.width(), self.background.height(),
                         self._disp.width(), self._disp.height(),
-                        image.Fit.FIT_CONTAIN,
+                        image.Fit.FIT_FILL,
                         slider['x'], slider['y'], slider['width'], slider['height']
                     )
 
@@ -209,15 +214,17 @@ class GUI:
                     new_value = max(slider['min'], min(new_value, slider['max']))
                     if slider['value'] != new_value:
                         slider['value'] = new_value
+                        self.dirty = True
                         if self.slider_callbacks[slider_id] is not None:
                             self.slider_callbacks[slider_id](slider_id, new_value)
                     self.dragging_slider = slider_id
             elif self.dragging_slider == slider_id:
                 self.dragging_slider = None
 
-    def run(self, background: Image) -> None:
+    def run(self, background: Image, poll_touch: bool = True) -> None:
         self.background = background
-        self.poll()
+        if poll_touch:
+            self.poll()
 
         # 绘制按钮
         for button_id in range(len(self.buttons)):
@@ -275,7 +282,8 @@ class GUI:
                     label_size = slider['label_size']
                     self.background.draw_string(slider['x'], slider['y']-label_size.height(), slider['label'], slider['slider_color'] )
 
-        self._disp.show(self.background)
+        self._disp.show(self.background, image.Fit.FIT_FILL)
+        self.dirty = False
 
 if __name__ == '__main__':
     def btn_pressed(btn_id, state):

@@ -19,8 +19,8 @@ _btn_binary = -1
 _btn_wb = -1
 _slider_id = -1
 _wb_requested = False
-_wb_status = '白平衡:待校准'
-_wb_detail = '请用白纸覆盖中心框'
+_wb_status = ''
+_wb_detail = ''
 _wb_profile = None
 WB_ROI = (128, 88, 64, 64)  # 白纸采样框，坐标基于320×240取景图
 WB_DEFAULT_GAINS = {
@@ -28,7 +28,7 @@ WB_DEFAULT_GAINS = {
     'maixcam2': [0.0682, 0.0, 0.0, 0.04897],
 }
 SOURCE_VERSION = '1.0.9'
-DEBUG_OUTPUT = False
+DEBUG_OUTPUT = True
 DISPLAY_OFF_COMMAND = 0x07
 DISPLAY_ON_COMMAND = 0x08
 _display_enabled = True
@@ -37,6 +37,9 @@ _perf = {'capture': 0, 'process': 0, 'gui': 0}
 _preview = np.zeros((240, 320, 3), dtype=np.uint8)  # 保存图像底图，供文字逐帧重绘
 _screen = np.zeros((320, 320, 3), dtype=np.uint8)
 _screen_image = None  # 保持共享显示缓冲区存活
+_process_buffers = None  # 首帧按检测尺寸分配，后续复用OpenCV输出数组
+TEXT_REFRESH_INTERVAL_MS = 500  # 关闭预览时的文字刷新间隔
+_last_text_refresh_ms = None
 COLOR_NAMES = ('未知', '红', '绿', '黄', '黑', '蓝')
 _color_state = {'candidate': (), 'frames': 0, 'label': '未检测'}
 CIRCLE_MIN_AREA = 1200
@@ -144,7 +147,7 @@ def load_white_balance(cam):
             raise ValueError('白平衡参数无效')
         apply_white_balance(cam, profile['gains'])
         _wb_profile = profile
-        _wb_status = '白平衡:已加载'
+        _wb_status = ''
         _wb_detail = ''
     except FileNotFoundError:
         pass
@@ -166,7 +169,7 @@ def calibrate_white_balance(cam):
         if not valid_wb_gains(previous_gains) and _wb_profile is not None:
             previous_gains = _wb_profile['gains'][:]
         # 自动模式下的手动增益字段可能尚未初始化，使用官方初值启动。
-        gains = (previous_gains if valid_wb_gains(previous_gains) else default_wb_gains())
+        gains = (previous_gains if valid_wb_gains(previous_gains) else default_wb_gains())[:]
         cam.awb_mode(camera.AwbMode.Manual)
         # 手动保持增益，分轮测量白纸并使红、蓝通道向绿色通道收敛。
         for attempt in range(8):
@@ -271,8 +274,9 @@ def camera_Init():
 
 
 def process_frame(img, comm, kernel, gui, fps):
-    global Yuanxy, _screen_image
+    global Yuanxy, _screen_image, _last_text_refresh_ms, _process_buffers
     process_start = time.ticks_ms()
+    gui.poll()  # 每帧读取触摸，保证关闭预览后按钮和滑条继续响应
     render = _display_enabled
     circle_ellipses = []
     detected_colors = []
@@ -282,24 +286,33 @@ def process_frame(img, comm, kernel, gui, fps):
     img_cv = image.image2cv(img, False, False)
     if img.format() != image.Format.FMT_BGR888:
         img_cv = image.image2cv(img, True, True)
-    detect_frame = cv2.resize(img_cv, None, fx=DETECT_SCALE, fy=DETECT_SCALE,
-                              interpolation=cv2.INTER_AREA)
+    if _process_buffers is None:
+        detect_frame = cv2.resize(img_cv, None, fx=DETECT_SCALE, fy=DETECT_SCALE,
+                                  interpolation=cv2.INTER_AREA)
+        _process_buffers = (
+            detect_frame, np.empty_like(detect_frame),
+            *(np.empty(detect_frame.shape[:2], dtype=np.uint8) for _ in range(6))
+        )
+    else:
+        cv2.resize(img_cv, None, dst=_process_buffers[0], fx=DETECT_SCALE,
+                   fy=DETECT_SCALE, interpolation=cv2.INTER_AREA)
+    detect_frame, frame_hsv, gray, blurred, edged, saturation, color_edges, ceroded = _process_buffers
 
     # 转灰度
-    gray = cv2.cvtColor(detect_frame, cv2.COLOR_BGR2GRAY)
+    cv2.cvtColor(detect_frame, cv2.COLOR_BGR2GRAY, dst=gray)
     # 高斯模糊去噪声
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    cv2.GaussianBlur(gray, (5, 5), 0, dst=blurred)
     # 边缘检测
-    edged = cv2.Canny(blurred, _context['threshold_circle'][0], _context['threshold_circle'][1])
+    cv2.Canny(blurred, *_context['threshold_circle'], edges=edged)
     # 饱和度边缘补充亮色圆形的边界。
-    frame_hsv = cv2.cvtColor(detect_frame, cv2.COLOR_BGR2HSV)
-    saturation = frame_hsv[:, :, 1]
-    color_edges = cv2.Canny(cv2.GaussianBlur(saturation, (5, 5), 0),
-                           *_context['threshold_circle'])
-    edged = cv2.bitwise_or(edged, color_edges)
+    cv2.cvtColor(detect_frame, cv2.COLOR_BGR2HSV, dst=frame_hsv)
+    cv2.extractChannel(frame_hsv, 1, dst=saturation)
+    cv2.GaussianBlur(saturation, (5, 5), 0, dst=blurred)
+    cv2.Canny(blurred, *_context['threshold_circle'], edges=color_edges)
+    cv2.bitwise_or(edged, color_edges, dst=edged)
     # 小范围连接边缘，并保留原始边缘像素。
-    ceroded = cv2.morphologyEx(edged, cv2.MORPH_CLOSE, kernel, iterations=1)
-    ceroded = cv2.bitwise_or(ceroded, edged)
+    cv2.morphologyEx(edged, cv2.MORPH_CLOSE, kernel, dst=ceroded, iterations=1)
+    cv2.bitwise_or(ceroded, edged, dst=ceroded)
     # 将单通道的ceroded转换为三通道BGR格式（便于显示和后续叠加彩色标记）
     ceroded_rgb = None
     if render:
@@ -317,14 +330,19 @@ def process_frame(img, comm, kernel, gui, fps):
 
     # 存储所有符合条件的圆形中心
     circle_centers = []
+    min_area = CIRCLE_MIN_AREA * DETECT_SCALE ** 2
+    min_perimeter = CIRCLE_MIN_PERIMETER * DETECT_SCALE
+    max_perimeter = 555 * DETECT_SCALE
     for cnt in contours:
+        if len(cnt) < 5:
+            continue
         area = cv2.contourArea(cnt)
+        if area < min_area:
+            continue
         perimeter = cv2.arcLength(cnt, True)
 
         # 过滤小轮廓和周长为0的异常轮廓
-        if (len(cnt) < 5 or perimeter < CIRCLE_MIN_PERIMETER * DETECT_SCALE
-                or area < CIRCLE_MIN_AREA * DETECT_SCALE ** 2
-                or perimeter > 555 * DETECT_SCALE):
+        if perimeter < min_perimeter or perimeter > max_perimeter:
             continue
 
         # 计算圆度
@@ -390,6 +408,11 @@ def process_frame(img, comm, kernel, gui, fps):
     update_color_label(detected_colors)
     render_start = time.ticks_ms()
     _perf['process'] = render_start - process_start
+    if (not render and _screen_image is not None and not gui.dirty
+            and _last_text_refresh_ms is not None
+            and render_start - _last_text_refresh_ms < TEXT_REFRESH_INTERVAL_MS):
+        _perf['gui'] = 0
+        return
     if render:
         x, y, width, height = WB_ROI
         cv2.rectangle(ceroded_rgb, (x, y), (x + width, y + height), (0, 255, 255), 1)
@@ -419,9 +442,11 @@ def process_frame(img, comm, kernel, gui, fps):
         detail = _wb_detail[line * 15:(line + 1) * 15]
         if detail:
             img_show.draw_string(65, 166 + line * 20, detail, image.COLOR_GREEN)
-    img_show.draw_string(65, 242, _wb_status, image.COLOR_GREEN)
-    gui.run(img_show)
+    if _wb_status:
+        img_show.draw_string(65, 242, _wb_status, image.COLOR_GREEN)
+    gui.run(img_show, poll_touch=False)
     _perf['gui'] = time.ticks_ms() - render_start
+    _last_text_refresh_ms = render_start
 
 
 comm = Comm()  # 串口初始化
@@ -430,9 +455,10 @@ comm = Comm()  # 串口初始化
 
 
 def set_display_enabled(enabled):
-    global _display_enabled
+    global _display_enabled, _last_text_refresh_ms
     if _display_enabled != enabled:
         _display_enabled = enabled
+        _last_text_refresh_ms = None
         gui.setButtonLabel(_btn_screen, '屏显开' if enabled else '屏显关')
 
 
@@ -454,8 +480,8 @@ def btn_pressed(btn_id, state):
         _context['disp_binary'] = not _context['disp_binary']
     elif btn_id == _btn_wb:
         _wb_requested = True
-        _wb_status = '白平衡:校准中'
-        _wb_detail = '请保持白纸和相机静止'
+        _wb_status = ''
+        _wb_detail = ''
 
 
 def slider_changed(slider_id, value):
