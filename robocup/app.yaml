@@ -1,0 +1,9 @@
+id: scavenger_vison
+name: scavenger_vison
+version: 1.0.9
+author: scavenger&3fire
+icon: app.png
+desc: 无
+files:
+  - gui.py
+  - main.py
