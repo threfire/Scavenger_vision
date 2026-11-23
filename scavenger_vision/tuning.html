@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>圆形识别调参 · Scavenger Vision</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+      background: #f1f5f7;
+      color: #152934;
+      --muted: #4c626e;
+      --border: #d8e2e7;
+      --accent: #006b61;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { background: #142b35; color: #fff; }
+    .wrap { max-width: 78rem; margin: 0 auto; padding-inline: 1.5rem; }
+    .top {
+      display: flex; justify-content: space-between; align-items: center;
+      flex-wrap: wrap; gap: 1rem; padding-block: 1.75rem;
+    }
+    .brand { color: #a8cec9; font-size: .875rem; font-weight: 650; }
+    h1 { margin: .4rem 0 0; font-size: clamp(1.65rem, 4vw, 2.35rem); }
+    #connection { font-size: .875rem; color: #ffdead; }
+    #connection.online { color: #a8ead6; }
+    main { padding-block: 1.5rem 2rem; }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 1rem; }
+    .preview-panel { align-self: start; min-width: 0; }
+    .preview-header {
+      display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;
+      gap: .7rem; margin-bottom: 1rem;
+    }
+    .preview-header h2 { margin: 0; }
+    .preview-modes { display: flex; gap: .4rem; }
+    .preview-modes button { min-height: 2.25rem; padding: .3rem .7rem; font-size: .875rem; }
+    .preview-modes [aria-pressed="true"] { background: #e0f3ee; border-color: #79ad9f; color: #00594f; }
+    .view {
+      position: relative; display: grid; place-items: center; overflow: hidden;
+      aspect-ratio: 4 / 3; margin: 0; border-radius: .45rem; background: #101b21; color: #d7e5eb;
+    }
+    .view img { display: block; width: 100%; height: 100%; object-fit: contain; }
+    .view [hidden] { display: none; }
+    #preview-status { margin: 1rem; text-align: center; font-size: .875rem; }
+    .legend { display: flex; flex-wrap: wrap; gap: .5rem 1rem; color: var(--muted); font-size: .875rem; }
+    .legend span { display: inline-flex; align-items: center; gap: .35rem; }
+    .legend span::before { content: ""; width: .6rem; height: .6rem; border-radius: 50%; }
+    .legend .contour::before { background: #285af0; }
+    .legend .center::before { background: #22883d; }
+    .legend .pale::before { background: #138593; }
+    .legend .ring::before { background: #d27a19; }
+    .metrics {
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0;
+      border: 1px solid var(--border); border-radius: .55rem;
+    }
+    .metrics > div { padding: .9rem 1rem; }
+    .metrics > div:nth-child(even) { border-left: 1px solid var(--border); }
+    .metrics > div:nth-child(n+3) { border-top: 1px solid var(--border); }
+    dt, label, .note { color: var(--muted); font-size: .875rem; }
+    dd { margin: .35rem 0 0; font-size: 1.2rem; }
+    dd, input { font-variant-numeric: tabular-nums; }
+    .panels { display: grid; gap: 1rem; }
+    .panel { border: 1px solid var(--border); border-radius: .7rem; padding: 1.2rem; background: #fff; }
+    h2 { margin: 0 0 1rem; font-size: 1.125rem; }
+    .fields { display: grid; grid-template-columns: 1fr 1fr; gap: .9rem; }
+    .field { min-width: 0; }
+    label { display: block; margin-bottom: .3rem; }
+    input[type="number"] {
+      width: 100%; min-height: 2.65rem; padding: .45rem .65rem; border: 1px solid #b9cbd2;
+      border-radius: .35rem; color: inherit; background: #fbfdfe; font: inherit; font-variant-numeric: tabular-nums;
+    }
+    input[type="range"] { display: block; width: 100%; margin: .6rem 0 0; accent-color: var(--accent); }
+    input:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .hues { margin-top: 1.1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+    h3 { font-size: .94rem; margin: 0 0 .75rem; }
+    .formbar { min-width: 0; background: #f1f5f7; padding-bottom: .5rem; }
+    .actions { display: flex; gap: .75rem; flex-wrap: wrap; }
+    button {
+      min-height: 2.7rem; padding: .45rem 1rem; border-radius: .4rem; border: 1px solid #aabdc5;
+      background: #fff; color: inherit; font: inherit; font-weight: 650; cursor: pointer;
+    }
+    button[type="submit"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button:disabled { opacity: .58; cursor: default; }
+    .note { margin: .75rem 0 0; }
+    #message { min-height: 1.3rem; margin: .45rem 0 0; font-size: .9rem; color: var(--accent); }
+    #message.error { color: #9b2922; }
+    @media (min-width: 51rem) and (min-height: 38rem) {
+      .preview-panel { position: sticky; top: 1rem; }
+      .formbar { position: sticky; top: 0; z-index: 1; padding-top: .6rem; }
+    }
+    @media (max-width: 50rem) {
+      .wrap { padding-inline: 1rem; }
+      .workspace { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap top">
+      <div>
+        <div class="brand">Scavenger Vision / MaixVision 调试</div>
+        <h1>圆形识别调参</h1>
+      </div>
+      <div id="connection" aria-live="polite">正在连接设备…</div>
+    </div>
+  </header>
+  <main class="wrap workspace">
+    <section class="panel preview-panel" aria-labelledby="preview-heading">
+      <div class="preview-header">
+        <h2 id="preview-heading">实时画面</h2>
+        <div class="preview-modes" role="group" aria-label="预览模式">
+          <button data-mode="camera" type="button" aria-pressed="true">原图</button>
+          <button data-mode="edges" type="button" aria-pressed="false">边缘图</button>
+        </div>
+      </div>
+      <figure class="view">
+        <img id="preview-image" width="320" height="240" alt="MaixCAM 实时识别画面" hidden>
+        <p id="preview-status">等待设备画面…</p>
+      </figure>
+      <p class="legend"><span class="contour">候选轮廓</span><span class="center">物料圆心</span><span class="pale">浅蓝 6</span><span class="ring">圆环 R0–R3</span></p>
+      <dl class="metrics" aria-label="当前识别结果">
+        <div><dt>帧率</dt><dd id="fps">—</dd></div>
+        <div><dt>候选轮廓</dt><dd id="contours">—</dd></div>
+        <div><dt>物料圆心（X, Y）</dt><dd id="center">—</dd></div>
+        <div><dt>发给 MCU 的颜色</dt><dd id="color">—</dd></div>
+        <div><dt>浅蓝物料坐标</dt><dd id="pale-centers">—</dd></div>
+        <div><dt>圆环编号与坐标</dt><dd id="rings">—</dd></div>
+      </dl>
+    </section>
+    <form id="settings">
+      <div class="formbar">
+        <div class="actions">
+          <button id="apply" type="submit" disabled>应用参数</button>
+          <button id="reset" type="button" disabled>恢复默认</button>
+        </div>
+        <p id="message" role="status"></p>
+      </div>
+      <div class="panels">
+        <section class="panel" aria-labelledby="geometry-heading">
+          <h2 id="geometry-heading">边缘与圆形</h2>
+          <div class="fields" id="geometry"></div>
+        </section>
+        <section class="panel" aria-labelledby="color-heading">
+          <h2 id="color-heading">颜色</h2>
+          <div class="fields" id="color-fields"></div>
+          <div class="hues">
+            <h3>色相 H（0–179）</h3>
+            <div class="fields" id="hue-fields"></div>
+          </div>
+        </section>
+      </div>
+      <p class="note">调整在本次调试中生效。重新运行工程会恢复默认值。</p>
+    </form>
+  </main>
+  <script>
+    const groups = {
+      geometry: {
+        canny_low: "Canny 下限", canny_high: "Canny 上限",
+        min_circularity: "圆度门槛", min_area: "最小面积（像素²）",
+        min_perimeter: "最小周长（像素）", max_perimeter: "最大周长（像素）",
+      },
+      "color-fields": {
+        saturation_min: "最低饱和度 S", brightness_min: "彩色最低亮度 V",
+        black_ratio: "黑色亮度 / 白纸亮度", min_color_fraction: "最小颜色票数比例",
+        light_blue_s_min: "浅蓝饱和度下限 S", light_blue_s_max: "浅蓝饱和度上限 S",
+        light_blue_v_min: "浅蓝最低亮度 V",
+      },
+      "hue-fields": {
+        red_low_end: "红色低段上限", red_high_start: "红色高段下限",
+        green_start: "绿色下限", green_end: "绿色上限",
+        yellow_start: "黄色下限", yellow_end: "黄色上限",
+        blue_start: "蓝色下限", blue_end: "蓝色上限",
+        light_blue_start: "浅蓝下限", light_blue_end: "浅蓝上限",
+      },
+    }
+    const token = /^\/tune\/([A-Za-z0-9_-]+)$/.exec(location.pathname)?.[1]
+    const form = document.querySelector("#settings")
+    const connection = document.querySelector("#connection")
+    const applyButton = document.querySelector("#apply")
+    const resetButton = document.querySelector("#reset")
+    const message = document.querySelector("#message")
+    const previewImage = document.querySelector("#preview-image")
+    const previewStatus = document.querySelector("#preview-status")
+    const modeButtons = document.querySelectorAll("[data-mode]")
+    const inputs = new Map()
+    const sliders = new Map()
+    const sliderFields = new Set(["canny_low", "canny_high", "min_circularity"])
+    const changed = new Set()
+    const defaults = {}
+    let online = false
+    let submitting = false
+    let revision = 0
+    let previewMode = "camera"
+    let previewUrl
+
+    function updateButtons() {
+      applyButton.disabled = !online || submitting || changed.size === 0
+      resetButton.disabled = !online || submitting
+    }
+
+    function setConnection(text, connected) {
+      if (connection.textContent !== text) connection.textContent = text
+      connection.classList.toggle("online", connected)
+      online = connected
+      updateButtons()
+    }
+
+    function showMessage(text, error = false) {
+      message.textContent = text
+      message.classList.toggle("error", error)
+    }
+
+    function errorText(error, fallback) {
+      if (error instanceof TypeError || error.name === "TimeoutError") {
+        return "无法连接调参服务，请确认 MaixVision 正在运行项目。"
+      }
+      return error.message || fallback
+    }
+
+    function markChanged(name) {
+      changed.add(name)
+      showMessage("")
+      updateButtons()
+    }
+
+    function setFieldValue(name, value) {
+      inputs.get(name).value = value
+      const slider = sliders.get(name)
+      if (slider) slider.value = value
+    }
+
+    function buildFields(parameters) {
+      for (const [groupId, fields] of Object.entries(groups)) {
+        const group = document.getElementById(groupId)
+        for (const [name, title] of Object.entries(fields)) {
+          const [initial, min, max, step] = parameters[name]
+          defaults[name] = initial
+          const field = document.createElement("div")
+          field.className = "field"
+          const label = document.createElement("label")
+          label.htmlFor = name
+          label.textContent = title
+          const input = document.createElement("input")
+          Object.assign(input, {id: name, name, type: "number", min, max, step, required: true})
+          input.addEventListener("input", () => {
+            const slider = sliders.get(name)
+            if (slider && input.validity.valid) slider.value = input.value
+            markChanged(name)
+          })
+          inputs.set(name, input)
+          field.append(label, input)
+          if (sliderFields.has(name)) {
+            const slider = document.createElement("input")
+            Object.assign(slider, {type: "range", min, max, step})
+            slider.setAttribute("aria-label", title + " 滑条")
+            slider.addEventListener("input", () => {
+              input.value = slider.value
+              markChanged(name)
+            })
+            sliders.set(name, slider)
+            field.append(slider)
+          }
+          group.append(field)
+        }
+      }
+    }
+
+    async function deviceFetch(path, data) {
+      const options = {
+        headers: {Authorization: "Bearer " + token},
+        signal: AbortSignal.timeout(2500),
+      }
+      if (data) {
+        options.method = "POST"
+        options.headers["Content-Type"] = "application/json"
+        options.body = JSON.stringify(data)
+      }
+      const response = await fetch(path, options)
+      if (!response.ok) throw new Error((await response.json()).error)
+      return response
+    }
+
+    function clearPreview(text) {
+      previewImage.hidden = true
+      previewImage.removeAttribute("src")
+      if (previewUrl) URL.revokeObjectURL(previewUrl)
+      previewUrl = undefined
+      previewStatus.textContent = text
+      previewStatus.hidden = false
+    }
+
+    async function refreshPreview() {
+      const mode = previewMode
+      try {
+        if (!online || document.hidden) return
+        const response = await deviceFetch("/api/preview/" + mode)
+        const frame = response.status === 200 ? await response.blob() : null
+        if (mode !== previewMode || !online) return
+        if (!frame) {
+          clearPreview("等待设备画面…")
+          return
+        }
+        const previousUrl = previewUrl
+        previewUrl = URL.createObjectURL(frame)
+        previewImage.src = previewUrl
+        previewImage.hidden = false
+        previewStatus.hidden = true
+        if (previousUrl) URL.revokeObjectURL(previousUrl)
+      } catch (error) {
+        if (mode === previewMode) clearPreview(errorText(error, "无法读取预览"))
+      } finally {
+        setTimeout(refreshPreview, 250)
+      }
+    }
+
+    async function refresh() {
+      const before = revision
+      try {
+        if (!submitting) {
+          const response = await deviceFetch("/api/state")
+          const {parameters, settings, result} = await response.json()
+          if (before !== revision) return
+          if (!inputs.size) buildFields(parameters)
+          for (const [name, input] of inputs) {
+            if (!changed.has(name) && document.activeElement !== input &&
+                document.activeElement !== sliders.get(name)) setFieldValue(name, settings[name])
+          }
+          document.querySelector("#fps").textContent = result.fps ?? "—"
+          document.querySelector("#contours").textContent = result.contours ?? "—"
+          document.querySelector("#center").textContent = result.center ? result.center.join(", ") : "—"
+          document.querySelector("#color").textContent = result.color ?? "—"
+          document.querySelector("#pale-centers").textContent =
+            result.light_blue_centers?.map(center => "(" + center.join(", ") + ")").join(" · ") || "—"
+          document.querySelector("#rings").textContent =
+            result.rings?.map(ring => "R" + ring.ring_id + " (" + ring.center.join(", ") + ")").join(" · ") || "—"
+          if (!online) showMessage("")
+          setConnection("设备已连接", true)
+        }
+      } catch (error) {
+        if (before === revision) {
+          setConnection("设备未连接", false)
+          clearPreview("等待设备连接…")
+          showMessage(errorText(error, "无法读取设备状态"), true)
+        }
+      } finally {
+        setTimeout(refresh, 750)
+      }
+    }
+
+    async function submit(settings, feedback) {
+      if (!online || submitting) return
+      submitting = true
+      revision++
+      updateButtons()
+      for (const input of inputs.values()) input.disabled = true
+      for (const slider of sliders.values()) slider.disabled = true
+      try {
+        await deviceFetch("/api/settings", settings)
+        for (const [name, value] of Object.entries(settings)) setFieldValue(name, value)
+        changed.clear()
+        showMessage(feedback)
+      } catch (error) {
+        showMessage(errorText(error, "未能提交参数"), true)
+      } finally {
+        for (const input of inputs.values()) input.disabled = false
+        for (const slider of sliders.values()) slider.disabled = false
+        submitting = false
+        updateButtons()
+      }
+    }
+
+    form.addEventListener("submit", event => {
+      event.preventDefault()
+      if (!changed.size) return
+      const settings = Object.fromEntries([...changed].map(name => [name, inputs.get(name).valueAsNumber]))
+      submit(settings, "参数已提交，将在下一帧生效。")
+    })
+    resetButton.addEventListener("click", () => submit(defaults, "默认值已提交，将在下一帧生效。"))
+    for (const button of modeButtons) {
+      button.addEventListener("click", () => {
+        if (previewMode === button.dataset.mode) return
+        previewMode = button.dataset.mode
+        for (const item of modeButtons) item.setAttribute("aria-pressed", item === button)
+        clearPreview("等待设备画面…")
+      })
+    }
+    if (token) {
+      refresh()
+      refreshPreview()
+    } else {
+      setConnection("缺少本次调试链接", false)
+      clearPreview("请通过本次调试链接打开实时画面。")
+      showMessage("请打开 MaixVision 控制台打印的完整「调参网页」链接。", true)
+    }
+  </script>
+</body>
+</html>
