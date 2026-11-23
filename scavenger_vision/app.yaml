@@ -7,3 +7,7 @@ desc: 无
 files:
   - gui.py
   - main.py
+  - ring_digits.py
+  - ring_glyphs.npz
+  - tuning.py
+  - tuning.html

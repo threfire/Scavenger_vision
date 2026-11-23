@@ -1,13 +1,23 @@
 from maix import camera, display, image, time, app, uart, sys, pinmap, err
 from gui import GUI
+from ring_digits import digit_templates, read_ring_digit
 import cv2
 import numpy as np
 import json
 import os
+from math import hypot
+from typing import NamedTuple
 
 class ValueMode:
     Min = 0
     Max = 1
+
+
+class Circle(NamedTuple):
+    center: tuple
+    ellipse: tuple
+    area: float
+
 
 gui = GUI()
 
@@ -31,6 +41,7 @@ SOURCE_VERSION = '1.0.9'
 DEBUG_OUTPUT = True
 DISPLAY_OFF_COMMAND = 0x07
 DISPLAY_ON_COMMAND = 0x08
+RING_IDS = (1, 2, 3)
 _display_enabled = True
 DETECT_SCALE = 0.75  # 240×180检测，输出坐标换算回320×240
 _perf = {'capture': 0, 'process': 0, 'gui': 0}
@@ -40,19 +51,44 @@ _screen_image = None  # 保持共享显示缓冲区存活
 _process_buffers = None  # 首帧按检测尺寸分配，后续复用OpenCV输出数组
 TEXT_REFRESH_INTERVAL_MS = 500  # 关闭预览时的文字刷新间隔
 _last_text_refresh_ms = None
-COLOR_NAMES = ('未知', '红', '绿', '黄', '黑', '蓝')
+COLOR_NAMES = ('未知', '红', '绿', '黄', '黑', '蓝', '浅蓝')
+LIGHT_BLUE = 6
 _color_state = {'candidate': (), 'frames': 0, 'label': '未检测'}
-CIRCLE_MIN_AREA = 1200
-CIRCLE_MIN_PERIMETER = 120
-Yuanxy = [0, 0, 0, 0, 0]
 
+
+# 默认值、下限、上限、网页输入步长。
+DETECTION_PARAMETERS = {
+    'canny_low': (50, 0, 255, 1),
+    'canny_high': (150, 0, 255, 1),
+    'min_circularity': (0.7, 0, 1, 0.01),
+    'min_area': (1200, 0, 76800, 1),
+    'min_perimeter': (120, 1, 2000, 1),
+    'max_perimeter': (555, 1, 2000, 1),
+    'saturation_min': (70, 0, 255, 1),
+    'brightness_min': (40, 0, 255, 1),
+    'black_ratio': (0.25, 0, 1, 0.01),
+    'min_color_fraction': (0.18, 0.01, 1, 0.01),
+    'red_low_end': (10, 0, 179, 1),
+    'red_high_start': (170, 0, 179, 1),
+    'green_start': (35, 0, 179, 1),
+    'green_end': (85, 0, 179, 1),
+    'yellow_start': (18, 0, 179, 1),
+    'yellow_end': (34, 0, 179, 1),
+    'blue_start': (90, 0, 179, 1),
+    'blue_end': (135, 0, 179, 1),
+    'light_blue_start': (85, 0, 179, 1),
+    'light_blue_end': (135, 0, 179, 1),
+    'light_blue_s_min': (30, 1, 255, 1),
+    'light_blue_s_max': (170, 1, 255, 1),
+    'light_blue_v_min': (155, 0, 255, 1),
+}
+_detection = {name: limits[0] for name, limits in DETECTION_PARAMETERS.items()}
+CANNY_KEYS = ('canny_low', 'canny_high')
 
 _context = {
     'value_mode': ValueMode.Min,
-
     'disp_binary': True,
 
-    'threshold_circle':[50,150]
 }
 
 
@@ -76,6 +112,19 @@ def apply_white_balance(cam, gains):
         raise ValueError('增益写入返回:' + repr(result))
 
 
+def black_brightness_threshold():
+    white_level = _wb_profile['white_level'] if _wb_profile is not None else 200
+    return max(30, min(80, white_level * _detection['black_ratio']))
+
+
+def light_blue_hsv_limits(black_level):
+    return (
+        (_detection['light_blue_start'], _detection['light_blue_s_min'],
+         max(_detection['light_blue_v_min'], int(np.ceil(black_level)))),
+        (_detection['light_blue_end'], _detection['light_blue_s_max'], 255),
+    )
+
+
 def detect_circle_color(frame, ellipse, frame_hsv=None):
     center, axes, angle = ellipse
     x, y, width, height = cv2.boundingRect(cv2.boxPoints(ellipse))
@@ -90,22 +139,106 @@ def detect_circle_color(frame, ellipse, frame_hsv=None):
     pixels = sample_frame[y0:y1:2, x0:x1:2][mask[::2, ::2] != 0]
     if len(pixels) < 20:
         return 0
-    # 色相区分红绿黄蓝，黑色使用相对白纸参考亮度。
+    # 色相区分彩色物料，浅蓝额外要求较高亮度与较低饱和度。
     hsv = (cv2.cvtColor(pixels.reshape(-1, 1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
            if frame_hsv is None else pixels)
     h, s, v = hsv[:, 0], hsv[:, 1], hsv[:, 2]
-    white_level = _wb_profile['white_level'] if _wb_profile is not None else 200
-    black_level = max(30, min(80, white_level * 0.25))
-    colored = (s >= 70) & (v >= max(40, black_level))
+    black_level = black_brightness_threshold()
+    (h_min, s_min, v_min), (h_max, s_max, _) = light_blue_hsv_limits(black_level)
+    light_blue = (h >= h_min) & (h <= h_max) & (s >= s_min) & (s <= s_max) & (v >= v_min)
+    colored = ((s >= _detection['saturation_min'])
+               & (v >= max(_detection['brightness_min'], black_level)) & ~light_blue)
     votes = [
-        np.count_nonzero(colored & ((h <= 10) | (h >= 170))),
-        np.count_nonzero(colored & (h >= 35) & (h <= 85)),
-        np.count_nonzero(colored & (h >= 18) & (h <= 34)),
+        np.count_nonzero(colored & ((h <= _detection['red_low_end']) | (h >= _detection['red_high_start']))),
+        np.count_nonzero(colored & (h >= _detection['green_start']) & (h <= _detection['green_end'])),
+        np.count_nonzero(colored & (h >= _detection['yellow_start']) & (h <= _detection['yellow_end'])),
         np.count_nonzero(v < black_level),
-        np.count_nonzero(colored & (h >= 90) & (h <= 135)),
+        np.count_nonzero(colored & (h >= _detection['blue_start']) & (h <= _detection['blue_end'])),
+        np.count_nonzero(light_blue),
     ]
     winner = int(np.argmax(votes))
-    return winner + 1 if votes[winner] >= len(pixels) * 0.18 else 0
+    return winner + 1 if votes[winner] >= len(pixels) * _detection['min_color_fraction'] else 0
+
+
+def distinct_circles(circles):
+    # Canny 的内外两侧可能为同一个目标产生两个近重合轮廓。
+    unique = []
+    for circle in sorted(circles, key=lambda candidate: candidate.area, reverse=True):
+        x, y = circle.center
+        radius = min(circle.ellipse[1]) / (2 * DETECT_SCALE)
+        if any(hypot(x - other.center[0], y - other.center[1])
+               <= max(2, min(radius, min(other.ellipse[1]) / (2 * DETECT_SCALE)) * 0.25)
+               for other in unique):
+            continue
+        unique.append(circle)
+    return unique
+
+
+def find_ring_shapes(contours, hierarchy, circles, min_circularity):
+    if not circles or hierarchy is None:
+        return [], set()
+
+    parents = hierarchy[0, :, 3]
+    holes = {}
+    ring_edges = set()
+    for index, contour in enumerate(contours):
+        ancestor = parents[index]
+        if ancestor < 0 or len(contour) < 5:
+            continue
+        ancestors = []
+        while ancestor >= 0:
+            if ancestor in circles:
+                ancestors.append(ancestor)
+            ancestor = parents[ancestor]
+        if not ancestors:
+            continue
+
+        area = cv2.contourArea(contour)
+        possible = [outer for outer in ancestors if 0.08 <= area / circles[outer].area <= 0.81]
+        if not possible:
+            continue
+        perimeter = cv2.arcLength(contour, True)
+        if perimeter == 0 or 4 * np.pi * area / perimeter ** 2 <= min_circularity:
+            continue
+        hole = cv2.fitEllipse(contour)
+        inner_center, inner_axes, _ = hole
+        for outer in possible:
+            outer_center, outer_axes, _ = circles[outer].ellipse
+            distance = hypot(inner_center[0] - outer_center[0], inner_center[1] - outer_center[1])
+            if min(outer_axes) <= 0 or distance > max(2, min(outer_axes) * 0.10):
+                continue
+            ratios = [inner / outer_axis for inner, outer_axis in zip(sorted(inner_axes), sorted(outer_axes))]
+            if min(ratios) < 0.28 or max(ratios) > 0.90 or abs(ratios[0] - ratios[1]) > 0.20:
+                continue
+            if outer not in holes or area > holes[outer][0]:
+                holes[outer] = (area, hole)
+            ring_edges.update((outer, index))
+
+    ring_holes = {circles[index]: holes[index][1] for index in sorted(holes)}
+    return [(circle, ring_holes[circle]) for circle in distinct_circles(ring_holes)], ring_edges
+
+
+def identify_rings(gray, shapes):
+    readings = [(read_ring_digit(gray, hole), tuple(map(int, circle.center)))
+                for circle, hole in shapes]
+    ids = [ring_id for ring_id, _ in readings]
+    return [(ring_id if ids.count(ring_id) == 1 else 0, center) for ring_id, center in readings]
+
+
+def summarize_materials(materials):
+    if not materials:
+        return None, None, ()
+
+    highest = min(circle.center[1] for circle, _ in materials)
+    lower = [index for index, (circle, _) in enumerate(materials) if circle.center[1] - highest > 25]
+    if len(lower) == 1:
+        materials = [material for index, material in enumerate(materials) if index != lower[0]]
+    centers = [circle.center for circle, _ in materials]
+    colors = [color for _, color in materials]
+    center = tuple(int(sum(axis) / len(axis)) for axis in zip(*centers))
+    counts = [colors.count(color) for color in range(1, LIGHT_BLUE)]
+    color = counts.index(max(counts)) + 1 if any(counts) else 0
+    return center, color, colors
 
 
 def update_color_label(colors):
@@ -236,22 +369,32 @@ class Comm:  # 串口类
         self.uart = serial
         self.Data_Temp = [0, 0]
 
-    def send_detect(self, Data):  # 五字节数据区：X补值、X基础值、Y补值、Y基础值、颜色
-        data = bytes([0xb3, 0xb3, int(Data[0]), int(Data[1]), int(Data[2]),
-                      int(Data[3]), int(Data[4]), 0x5b])
+    def _send_position(self, frame_type, center, code):
+        x, y = center
+        data = bytes((0xb3, frame_type, max(0, x - 255), min(x, 255),
+                      max(0, y - 255), min(y, 255), code, 0x5b))
         self.uart.write(data)
         if DEBUG_OUTPUT:
             print("send_data:", data)
 
-    def read_display_command(self):
-        # 非阻塞读取；连续收到多个开关指令时采用最后一个。
+    def send_detect(self, center, color):
+        self._send_position(0xb3, center, color)
+
+    def send_ring(self, center, ring_id):
+        self._send_position(0xb4, center, ring_id)
+
+    def read_commands(self):
+        # 屏显采用最后一个指令，每个圆环请求各返回一帧。
         enabled = None
+        ring_requests = []
         for value in self.uart.read() or b'':
             if value == DISPLAY_OFF_COMMAND:
                 enabled = False
             elif value == DISPLAY_ON_COMMAND:
                 enabled = True
-        return enabled
+            elif value in RING_IDS:
+                ring_requests.append(value)
+        return enabled, ring_requests
 
 
 def camera_Init():
@@ -260,15 +403,47 @@ def camera_Init():
     return cam
 
 
-def process_frame(img, comm, kernel, gui, fps):
-    global Yuanxy, _screen_image, _last_text_refresh_ms, _process_buffers
+def draw_preview(target, frame, edges, show_edges, circles, average_center, marker_color):
+    if show_edges:
+        resized = cv2.resize(edges, (frame.shape[1], frame.shape[0]),
+                             interpolation=cv2.INTER_NEAREST)
+        cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR, dst=target)
+    else:
+        target[:] = frame
+    for center, (_, axes, angle), _ in circles:
+        scaled_axes = (axes[0] / DETECT_SCALE, axes[1] / DETECT_SCALE)
+        cv2.ellipse(target, (center, scaled_axes, angle), (255, 0, 0), 3)
+    if average_center is not None:
+        cv2.drawMarker(target, average_center, marker_color, cv2.MARKER_CROSS, 20, 3)
+
+
+def draw_target_labels(preview, pale_centers, rings):
+    for center in pale_centers:
+        cv2.drawMarker(preview, center, (255, 235, 60), cv2.MARKER_CROSS, 12, 2)
+        cv2.putText(preview, '6', (center[0] + 5, center[1] - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 235, 60), 2)
+    for ring_id, center in rings:
+        cv2.drawMarker(preview, center, (0, 165, 255), cv2.MARKER_CROSS, 12, 2)
+        cv2.putText(preview, f'R{ring_id}', (center[0] + 5, center[1] - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
+
+
+def encode_preview(frame):
+    try:
+        encoded, data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if encoded:
+            return data.tobytes()
+    except (AttributeError, cv2.error):
+        pass
+    jpeg = image.cv2image(frame, True, False).to_jpeg(75)
+    return bytes(jpeg.to_bytes())
+
+
+def process_frame(img, comm, kernel, gui, fps, tuning=None, ring_requests=()):
+    global _screen_image, _last_text_refresh_ms, _process_buffers
     process_start = time.ticks_ms()
     gui.poll()  # 每帧读取触摸，保证关闭预览后按钮和滑条继续响应
     render = _display_enabled
-    circle_ellipses = []
-    detected_colors = []
-    avg_center_x = 0  # 平均中心X坐标
-    avg_center_y = 0  # 平均中心Y坐标
     # 相机直接输出BGR时共享取景缓冲区；其生命周期由当前img保持。
     img_cv = image.image2cv(img, False, False)
     if img.format() != image.Format.FMT_BGR888:
@@ -290,37 +465,36 @@ def process_frame(img, comm, kernel, gui, fps):
     # 高斯模糊去噪声
     cv2.GaussianBlur(gray, (5, 5), 0, dst=blurred)
     # 边缘检测
-    cv2.Canny(blurred, *_context['threshold_circle'], edges=edged)
+    canny_low = _detection['canny_low']
+    canny_high = _detection['canny_high']
+    cv2.Canny(blurred, canny_low, canny_high, edges=edged)
     # 饱和度边缘补充亮色圆形的边界。
     cv2.cvtColor(detect_frame, cv2.COLOR_BGR2HSV, dst=frame_hsv)
     cv2.extractChannel(frame_hsv, 1, dst=saturation)
     cv2.GaussianBlur(saturation, (5, 5), 0, dst=blurred)
-    cv2.Canny(blurred, *_context['threshold_circle'], edges=color_edges)
+    cv2.Canny(blurred, canny_low, canny_high, edges=color_edges)
     cv2.bitwise_or(edged, color_edges, dst=edged)
+    # 浅蓝与白底的灰度、饱和度差可能较小，用颜色掩膜补充边界。
+    lower, upper = light_blue_hsv_limits(black_brightness_threshold())
+    cv2.inRange(frame_hsv, lower, upper, dst=blurred)
+    cv2.morphologyEx(blurred, cv2.MORPH_OPEN, kernel, dst=blurred)
+    if cv2.countNonZero(blurred) >= 20:
+        cv2.Canny(blurred, canny_low, canny_high, edges=color_edges)
+        cv2.bitwise_or(edged, color_edges, dst=edged)
     # 小范围连接边缘，并保留原始边缘像素。
     cv2.morphologyEx(edged, cv2.MORPH_CLOSE, kernel, dst=ceroded, iterations=1)
     cv2.bitwise_or(ceroded, edged, dst=ceroded)
-    # 将单通道的ceroded转换为三通道BGR格式（便于显示和后续叠加彩色标记）
-    ceroded_rgb = None
-    if render:
-        ceroded_rgb = _preview
-        if _context['disp_binary']:
-            edges_show = cv2.resize(ceroded, (img_cv.shape[1], img_cv.shape[0]),
-                                    interpolation=cv2.INTER_NEAREST)
-            cv2.cvtColor(edges_show, cv2.COLOR_GRAY2BGR, dst=ceroded_rgb)
-        else:
-            ceroded_rgb[:] = img_cv
     # 找轮廓
-    contours, _ = cv2.findContours(ceroded, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    contours, hierarchy = cv2.findContours(ceroded, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     # 圆度阈值
-    min_circularity = 0.7
+    min_circularity = _detection['min_circularity']
 
     # 存储所有符合条件的圆形中心
-    circle_centers = []
-    min_area = CIRCLE_MIN_AREA * DETECT_SCALE ** 2
-    min_perimeter = CIRCLE_MIN_PERIMETER * DETECT_SCALE
-    max_perimeter = 555 * DETECT_SCALE
-    for cnt in contours:
+    circles = {}
+    min_area = _detection['min_area'] * DETECT_SCALE ** 2
+    min_perimeter = _detection['min_perimeter'] * DETECT_SCALE
+    max_perimeter = _detection['max_perimeter'] * DETECT_SCALE
+    for index, cnt in enumerate(contours):
         if len(cnt) < 5:
             continue
         area = cv2.contourArea(cnt)
@@ -336,65 +510,65 @@ def process_frame(img, comm, kernel, gui, fps):
         circularity = 4 * np.pi * area / (perimeter **2)
         if circularity > min_circularity:
             # 拟合椭圆，获取中心坐标
-            center, axes, angle = cv2.fitEllipse(cnt)
-            circle_ellipses.append((center, axes, angle))
+            ellipse = cv2.fitEllipse(cnt)
+            center = ellipse[0]
             center = (center[0] / DETECT_SCALE, center[1] / DETECT_SCALE)
-            axes = (axes[0] / DETECT_SCALE, axes[1] / DETECT_SCALE)
-            circle_centers.append(center)  # 原始320×240图像坐标
+            if not (0 <= center[0] < img_cv.shape[1] and 0 <= center[1] < img_cv.shape[0]):
+                continue
+            circles[index] = Circle(center, ellipse, area)
 
-            # 绘制所有符合条件的圆（便于调试）
-            if render:
-                cv2.ellipse(ceroded_rgb, (center, axes, angle), (255, 0, 0), 3)
-
-    if circle_centers:
-        # 提取所有圆心的y坐标
-        ys = [c[1] for c in circle_centers]
-        # 最上方圆的y坐标（最小值，因为y越小越靠上）
-        min_y = min(ys)
-        # 计算每个圆心y坐标与最上方圆心y坐标的差值
-        y_diffs = [y - min_y for y in ys]
-
-        # 找出差值大于25像素的圆心（可能的错误圆）
-        error_indices = [i for i, diff in enumerate(y_diffs) if diff > 25]
-
-        # 仅当存在且仅存在1个错误圆时，剔除该圆
-        if len(error_indices) == 1:
-            filtered_centers = [c for i, c in enumerate(circle_centers) if i not in error_indices]
+    ring_shapes, ring_edges = find_ring_shapes(contours, hierarchy, circles, min_circularity)
+    rings = identify_rings(gray, ring_shapes) if ring_requests or tuning is not None else []
+    confirmed_rings = {ring_id: center for ring_id, center in rings if ring_id}
+    for requested_id in ring_requests:
+        if requested_id in confirmed_rings:
+            comm.send_ring(confirmed_rings[requested_id], requested_id)
         else:
-            filtered_centers = circle_centers  # 无错误圆或不符合条件，保留所有圆
+            comm.send_ring((0, 0), 0)
+    materials = [(circle, detect_circle_color(detect_frame, circle.ellipse, frame_hsv))
+                 for index, circle in circles.items() if index not in ring_edges]
+    ordinary = [(circle, color) for circle, color in materials if color != LIGHT_BLUE]
+    pale = distinct_circles(circle for circle, color in materials if color == LIGHT_BLUE)
+    pale_centers = [tuple(map(int, circle.center)) for circle in pale]
+    average_center, material_color, colors = summarize_materials(ordinary)
+    update_color_label([*colors, LIGHT_BLUE] if pale_centers else colors)
+    if average_center is not None:
+        comm.send_detect(average_center, material_color)
+    for center in pale_centers:
+        comm.send_detect(center, LIGHT_BLUE)
 
-        # 计算过滤后圆心的平均坐标
-        xs_filtered = [c[0] for c in filtered_centers]
-        ys_filtered = [c[1] for c in filtered_centers]
-        avg_center_x = sum(xs_filtered) / len(xs_filtered)
-        avg_center_y = sum(ys_filtered) / len(ys_filtered)
-
-        # 在处理后的图像上标记平均中心
-        if render:
-            cv2.drawMarker(ceroded_rgb, (int(avg_center_x), int(avg_center_y)),
-                        (255, 0, 0), cv2.MARKER_CROSS, 20, 3)
-
-    if circle_centers:  # 存在圆形时才更新数据
-        # 保存平均中心坐标
-        Yuanxy = [0, 0, 0, 0, 0]
-        Yuanxy[1] = int(avg_center_x)
-        Yuanxy[3] = int(avg_center_y)
-        if Yuanxy[1] > 255:
-            Yuanxy[0] = Yuanxy[1] - 255
-            Yuanxy[1] = 255
-        if Yuanxy[3] > 255:
-            Yuanxy[2] = Yuanxy[3] - 255
-            Yuanxy[3] = 255
-
-    if circle_centers:
-        detected_colors = [detect_circle_color(detect_frame, ellipse, frame_hsv)
-                           for center, ellipse in zip(circle_centers, circle_ellipses)
-                           if center in filtered_centers]
-    update_color_label(detected_colors)
-    if circle_centers:
-        color_counts = [detected_colors.count(value) for value in range(1, len(COLOR_NAMES))]
-        Yuanxy[4] = color_counts.index(max(color_counts)) + 1 if any(color_counts) else 0
-        comm.send_detect(Yuanxy)
+    display_center = average_center or (pale_centers[0] if len(pale_centers) == 1 else None)
+    display_color = COLOR_NAMES[material_color] if material_color is not None else None
+    if pale_centers:
+        pale_name = COLOR_NAMES[LIGHT_BLUE]
+        display_color = f'{display_color} / {pale_name}' if display_color else pale_name
+    show_edges = _context['disp_binary']
+    if render:
+        draw_preview(_preview, img_cv, ceroded, show_edges, circles.values(),
+                     display_center, (255, 0, 0))
+        draw_target_labels(_preview, pale_centers, rings)
+        x, y, width, height = WB_ROI
+        cv2.rectangle(_preview, (x, y), (x + width, y + height), (0, 255, 255), 1)
+    if tuning is not None:
+        tuning.publish(_detection, {
+            'fps': fps,
+            'contours': len(circles),
+            'center': display_center,
+            'color': display_color,
+            'light_blue_centers': pale_centers,
+            'rings': [{'ring_id': ring_id, 'center': center} for ring_id, center in rings],
+        })
+        for mode in tuning.preview_modes():
+            preview = np.empty_like(img_cv)
+            draw_preview(preview, img_cv, ceroded, mode == 'edges', circles.values(),
+                         display_center, (0, 255, 0))
+            draw_target_labels(preview, pale_centers, rings)
+            try:
+                tuning.publish_preview(mode, encode_preview(preview))
+            except Exception as error:
+                print('网页预览编码失败:', error)
+                tuning.disable_preview()
+                break
     render_start = time.ticks_ms()
     _perf['process'] = render_start - process_start
     if (not render and _screen_image is not None and not gui.dirty
@@ -402,9 +576,6 @@ def process_frame(img, comm, kernel, gui, fps):
             and render_start - _last_text_refresh_ms < TEXT_REFRESH_INTERVAL_MS):
         _perf['gui'] = 0
         return
-    if render:
-        x, y, width, height = WB_ROI
-        cv2.rectangle(ceroded_rgb, (x, y), (x + width, y + height), (0, 255, 255), 1)
     # 下方80像素用于触摸控件，FPS按文字宽度贴右下角排列。
     screen = _screen
     # 从干净底图恢复文字背景；关闭图像刷新时使用最后一张底图。
@@ -421,10 +592,10 @@ def process_frame(img, comm, kernel, gui, fps):
     img_show = _screen_image
     # 信息按固定行排列，颜色位于取景区左上角。
     img_show.draw_string(65, 2, '颜色:' + _color_state['label'], image.COLOR_GREEN)
-    img_show.draw_string(65, 22, '阈值:{},{}'.format(*_context['threshold_circle']), image.COLOR_GREEN)
-    coordinates = 'X:{} Y:{}'.format(int(avg_center_x), int(avg_center_y)) if circle_centers else 'X:-- Y:--'
+    img_show.draw_string(65, 22, '阈值:{},{}'.format(canny_low, canny_high), image.COLOR_GREEN)
+    coordinates = 'X:{} Y:{}'.format(*display_center) if display_center is not None else 'X:-- Y:--'
     img_show.draw_string(65, 42, coordinates, image.COLOR_GREEN)
-    img_show.draw_string(65, 62, '轮廓数:{}'.format(len(circle_centers)), image.COLOR_GREEN)
+    img_show.draw_string(65, 62, '轮廓数:{}'.format(len(circles)), image.COLOR_GREEN)
     img_show.draw_string(65, 82, '采{} 算{} 显{}ms'.format(
         _perf['capture'], _perf['process'], _perf['gui']), image.COLOR_GREEN)
     for line in range(3):
@@ -451,6 +622,11 @@ def set_display_enabled(enabled):
         gui.setButtonLabel(_btn_screen, '屏显开' if enabled else '屏显关')
 
 
+def sync_canny_slider():
+    key = CANNY_KEYS[_context['value_mode']]
+    gui.setSliderValue(_slider_id, int(_detection[key] / 255 * 100))
+
+
 def btn_pressed(btn_id, state):
     global _wb_requested, _wb_status, _wb_detail
     if state == 1:
@@ -464,7 +640,7 @@ def btn_pressed(btn_id, state):
         label = 'C Max' if index == ValueMode.Max else 'C Min'
         gui.setButtonLabel(_btn_ch1, label)
         gui.setSliderLabel(_slider_id, label)
-        gui.setSliderValue(_slider_id, int(_context['threshold_circle'][index] / 255 * 100))
+        sync_canny_slider()
     elif btn_id == _btn_binary:
         _context['disp_binary'] = not _context['disp_binary']
     elif btn_id == _btn_wb:
@@ -474,13 +650,36 @@ def btn_pressed(btn_id, state):
 
 
 def slider_changed(slider_id, value):
-    _context['threshold_circle'][_context['value_mode']] = int(value / 100 * 255)
+    key = CANNY_KEYS[_context['value_mode']]
+    _detection[key] = int(value / 100 * 255)
+
+
+def start_tuning_server():
+    if os.environ.get('MAIXVISION') != '1':
+        return None
+    try:
+        from tuning import TuningServer
+        tuning = TuningServer(DETECTION_PARAMETERS)
+    except (ImportError, OSError, RuntimeError) as error:
+        print('调参网页启动失败:', error)
+        return None
+
+    try:
+        addresses = sys.ip_address().values()
+    except Exception as error:
+        print('读取设备 IP 失败:', error)
+        addresses = ()
+    addresses = sorted({ip for ip in addresses if '.' in ip and not ip.startswith('127.')})
+    for ip in addresses or ['<设备 IP>']:
+        print('调参网页:', tuning.url(ip), flush=True)
+    return tuning
 
 
 def main():
     global _btn_mode, _btn_ch1, _btn_ch2, _btn_screen, _btn_binary, _btn_wb, _slider_id, _wb_requested
     # 单核平台减少OpenCV线程调度；MaixVision传输使用官方JPEG画质接口。
     cv2.setNumThreads(1)
+    digit_templates()
     if hasattr(display, 'set_trans_image_quality'):
         display.set_trans_image_quality(70)
     cam = camera_Init()
@@ -498,23 +697,33 @@ def main():
     gui.setButtonCallback(_btn_wb, btn_pressed)
     _slider_id = gui.createSlider(80, 294, 140, 18, label='C Min')
     gui.setSliderCallback(_slider_id, slider_changed)
-    gui.setSliderValue(_slider_id, int(_context['threshold_circle'][0] / 255 * 100))
+    sync_canny_slider()
     fps = 0
-    while not app.need_exit():
-        if _wb_requested:
-            _wb_requested = False
-            calibrate_white_balance(cam)
-        frame_start = time.ticks_ms()
-        command = comm.read_display_command()
-        if command is not None:
-            set_display_enabled(command)
-        capture_start = time.ticks_ms()
-        img = cam.read()
-        _perf['capture'] = time.ticks_ms() - capture_start
-        process_frame(img, comm, kernel, gui, fps)
-        fps = int(1000.0 / max(time.ticks_ms() - frame_start, 1))
-        if DEBUG_OUTPUT:
-            print('FPS:', fps, '阶段耗时:', _perf)
+    tuning = start_tuning_server()
+    try:
+        while not app.need_exit():
+            if _wb_requested:
+                _wb_requested = False
+                calibrate_white_balance(cam)
+            frame_start = time.ticks_ms()
+            if tuning is not None:
+                changes = tuning.take_changes()
+                _detection.update(changes)
+                if any(key in changes for key in CANNY_KEYS):
+                    sync_canny_slider()
+            command, ring_requests = comm.read_commands()
+            if command is not None:
+                set_display_enabled(command)
+            capture_start = time.ticks_ms()
+            img = cam.read()
+            _perf['capture'] = time.ticks_ms() - capture_start
+            process_frame(img, comm, kernel, gui, fps, tuning, ring_requests)
+            fps = int(1000.0 / max(time.ticks_ms() - frame_start, 1))
+            if DEBUG_OUTPUT:
+                print('FPS:', fps, '阶段耗时:', _perf)
+    finally:
+        if tuning is not None:
+            tuning.close()
 
 
 if __name__ == "__main__":
